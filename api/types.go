@@ -250,11 +250,11 @@ var ipfsPinStatus2TrackerStatusMap = map[IPFSPinStatus]TrackerStatus{
 // GlobalPinInfo contains cluster-wide status information about a tracked Cid,
 // indexed by cluster peer.
 type GlobalPinInfo struct {
-	Cid         cid.Cid               `json:"cid" codec:"c"`
-	Name        string                `json:"name" codec:"n"`
-	Allocations []peer.ID             `json:"allocations" codec:"a,omitempty"`
-	Origins     []multiaddr.Multiaddr `json:"origins" codec:"g,omitempty"`
-	Metadata    map[string]string     `json:"metadata" codec:"m,omitempty"`
+	Cid         cid.Cid           `json:"cid" codec:"c"`
+	Name        string            `json:"name" codec:"n"`
+	Allocations []peer.ID         `json:"allocations" codec:"a,omitempty"`
+	Origins     []Multiaddr       `json:"origins" codec:"g,omitempty"`
+	Metadata    map[string]string `json:"metadata" codec:"m,omitempty"`
 
 	// https://github.com/golang/go/issues/28827
 	// Peer IDs are of string Kind(). We can't use peer IDs here
