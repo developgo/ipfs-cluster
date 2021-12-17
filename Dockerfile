@@ -1,4 +1,4 @@
-FROM golang:1.16-buster AS builder
+FROM golang:1.17-buster AS builder
 MAINTAINER Hector Sanjuan <hector@protocol.ai>
 
 # This dockerfile builds and runs ipfs-cluster-service.
@@ -28,11 +28,11 @@ RUN set -eux; \
 # Get the TLS CA certificates, they're not provided by busybox.
 RUN apt-get update && apt-get install -y ca-certificates
 
-COPY go.* $SRC_PATH/
+COPY --chown=1000:users go.* $SRC_PATH/
 WORKDIR $SRC_PATH
 RUN go mod download
 
-COPY . $SRC_PATH
+COPY --chown=1000:users . $SRC_PATH
 RUN make install
 
 

@@ -39,9 +39,6 @@ var logger = logging.Logger("apitypes")
 var unixZero = time.Unix(0, 0)
 
 func init() {
-	// Use /p2p/ multiaddresses
-	multiaddr.SwapToP2pMultiaddrs()
-
 	// intialize trackerStatusString
 	stringTrackerStatus = make(map[string]TrackerStatus)
 	for k, v := range trackerStatusString {
@@ -306,21 +303,23 @@ func (gpi *GlobalPinInfo) Match(filter TrackerStatus) bool {
 // PinInfoShort is a subset of PinInfo which is embedded in GlobalPinInfo
 // objects and does not carry redundant information as PinInfo would.
 type PinInfoShort struct {
-	PeerName string        `json:"peername" codec:"pn,omitempty"`
-	Status   TrackerStatus `json:"status" codec:"st,omitempty"`
-	TS       time.Time     `json:"timestamp" codec:"ts,omitempty"`
-	Error    string        `json:"error" codec:"e,omitempty"`
+	PeerName     string        `json:"peername" codec:"pn,omitempty"`
+	Status       TrackerStatus `json:"status" codec:"st,omitempty"`
+	TS           time.Time     `json:"timestamp" codec:"ts,omitempty"`
+	Error        string        `json:"error" codec:"e,omitempty"`
+	AttemptCount int           `json:"attempt_count" codec:"a,omitempty"`
+	PriorityPin  bool          `json:"priority_pin" codec:"y,omitempty"`
 }
 
 // PinInfo holds information about local pins. This is used by the Pin
 // Trackers.
 type PinInfo struct {
-	Cid         cid.Cid               `json:"cid" codec:"c"`
-	Name        string                `json:"name" codec:"m,omitempty"`
-	Peer        peer.ID               `json:"Peer" codec:"p,omitempty"`
-	Allocations []peer.ID             `json:"allocations" codec:"a,omitempty"`
-	Origins     []multiaddr.Multiaddr `json:"origins" codec:"g,omitempty"`
-	Metadata    map[string]string     `json:"metadata" codec:"md,omitempty"`
+	Cid         cid.Cid           `json:"cid" codec:"c"`
+	Name        string            `json:"name" codec:"m,omitempty"`
+	Peer        peer.ID           `json:"Peer" codec:"p,omitempty"`
+	Allocations []peer.ID         `json:"allocations" codec:"a,omitempty"`
+	Origins     []Multiaddr       `json:"origins" codec:"g,omitempty"`
+	Metadata    map[string]string `json:"metadata" codec:"md,omitempty"`
 
 	PinInfoShort
 }
@@ -588,16 +587,16 @@ func (pm PinMode) ToPinDepth() PinDepth {
 
 // PinOptions wraps user-defined options for Pins
 type PinOptions struct {
-	ReplicationFactorMin int                   `json:"replication_factor_min" codec:"rn,omitempty"`
-	ReplicationFactorMax int                   `json:"replication_factor_max" codec:"rx,omitempty"`
-	Name                 string                `json:"name" codec:"n,omitempty"`
-	Mode                 PinMode               `json:"mode" codec:"o,omitempty"`
-	ShardSize            uint64                `json:"shard_size" codec:"s,omitempty"`
-	UserAllocations      []peer.ID             `json:"user_allocations" codec:"ua,omitempty"`
-	ExpireAt             time.Time             `json:"expire_at" codec:"e,omitempty"`
-	Metadata             map[string]string     `json:"metadata" codec:"m,omitempty"`
-	PinUpdate            cid.Cid               `json:"pin_update,omitempty" codec:"pu,omitempty"`
-	Origins              []multiaddr.Multiaddr `json:"origins" codec:"g,omitempty"`
+	ReplicationFactorMin int               `json:"replication_factor_min" codec:"rn,omitempty"`
+	ReplicationFactorMax int               `json:"replication_factor_max" codec:"rx,omitempty"`
+	Name                 string            `json:"name" codec:"n,omitempty"`
+	Mode                 PinMode           `json:"mode" codec:"o,omitempty"`
+	ShardSize            uint64            `json:"shard_size" codec:"s,omitempty"`
+	UserAllocations      []peer.ID         `json:"user_allocations" codec:"ua,omitempty"`
+	ExpireAt             time.Time         `json:"expire_at" codec:"e,omitempty"`
+	Metadata             map[string]string `json:"metadata" codec:"m,omitempty"`
+	PinUpdate            cid.Cid           `json:"pin_update,omitempty" codec:"pu,omitempty"`
+	Origins              []Multiaddr       `json:"origins" codec:"g,omitempty"`
 }
 
 // Equals returns true if two PinOption objects are equivalent. po and po2 may
@@ -668,7 +667,7 @@ func (po *PinOptions) Equals(po2 *PinOptions) bool {
 	for _, o1 := range po.Origins {
 		found := false
 		for _, o2 := range po2.Origins {
-			if o1.Equal(o2) {
+			if o1.Value().Equal(o2.Value()) {
 				found = true
 			}
 		}
@@ -793,9 +792,9 @@ func (po *PinOptions) FromQuery(q url.Values) error {
 	originsStr := q.Get("origins")
 	if originsStr != "" {
 		origins := strings.Split(originsStr, ",")
-		maOrigins := make([]multiaddr.Multiaddr, len(origins))
+		maOrigins := make([]Multiaddr, len(origins))
 		for i, ostr := range origins {
-			maOrig, err := multiaddr.NewMultiaddr(ostr)
+			maOrig, err := NewMultiaddr(ostr)
 			if err != nil {
 				return fmt.Errorf("error decoding multiaddress: %w", err)
 			}
@@ -853,6 +852,9 @@ type Pin struct {
 	// it is the previous shard CID.
 	// When not needed the pointer is nil
 	Reference *cid.Cid `json:"reference" codec:"r,omitempty"`
+
+	// The time that the pin was submitted to the consensus layer.
+	Timestamp time.Time `json:"timestamp" codec:"i,omitempty"`
 }
 
 // String is a string representation of a Pin.
@@ -887,6 +889,7 @@ func PinCid(c cid.Cid) *Pin {
 		Type:        DataType,
 		Allocations: []peer.ID{},
 		MaxDepth:    -1, // Recursive
+		Timestamp:   time.Now(),
 	}
 }
 
@@ -936,6 +939,12 @@ func (pin *Pin) ProtoMarshal() ([]byte, error) {
 		expireAtProto = uint64(pin.ExpireAt.Unix())
 	}
 
+	var timestampProto uint64
+	// Only set the protobuf field with non-zero times.
+	if !(pin.Timestamp.IsZero() || pin.Timestamp.Equal(unixZero)) {
+		timestampProto = uint64(pin.Timestamp.Unix())
+	}
+
 	opts := &pb.PinOptions{
 		ReplicationFactorMin: int32(pin.ReplicationFactorMin),
 		ReplicationFactorMax: int32(pin.ReplicationFactorMax),
@@ -955,6 +964,7 @@ func (pin *Pin) ProtoMarshal() ([]byte, error) {
 		Allocations: allocs,
 		MaxDepth:    int32(pin.MaxDepth),
 		Options:     opts,
+		Timestamp:   timestampProto,
 	}
 	if ref := pin.Reference; ref != nil {
 		pbPin.Reference = ref.Bytes()
@@ -999,15 +1009,21 @@ func (pin *Pin) ProtoUnmarshal(data []byte) error {
 		pin.Reference = &ref
 	}
 
+	ts := pbPin.GetTimestamp()
+	if ts > 0 {
+		pin.Timestamp = time.Unix(int64(ts), 0)
+	}
+
 	opts := pbPin.GetOptions()
 	pin.ReplicationFactorMin = int(opts.GetReplicationFactorMin())
 	pin.ReplicationFactorMax = int(opts.GetReplicationFactorMax())
 	pin.Name = opts.GetName()
 	pin.ShardSize = opts.GetShardSize()
+
 	// pin.UserAllocations = opts.GetUserAllocations()
-	t := opts.GetExpireAt()
-	if t > 0 {
-		pin.ExpireAt = time.Unix(int64(t), 0)
+	exp := opts.GetExpireAt()
+	if exp > 0 {
+		pin.ExpireAt = time.Unix(int64(exp), 0)
 	}
 	pin.Metadata = opts.GetMetadata()
 	pinUpdate, err := cid.Cast(opts.GetPinUpdate())
@@ -1020,13 +1036,13 @@ func (pin *Pin) ProtoUnmarshal(data []byte) error {
 	pin.Mode = pin.MaxDepth.ToPinMode()
 
 	pbOrigins := opts.GetOrigins()
-	origins := make([]multiaddr.Multiaddr, len(pbOrigins))
+	origins := make([]Multiaddr, len(pbOrigins))
 	for i, orig := range pbOrigins {
 		maOrig, err := multiaddr.NewMultiaddrBytes(orig)
 		if err != nil {
 			return err
 		}
-		origins[i] = maOrig
+		origins[i] = NewMultiaddrWithValue(maOrig)
 	}
 	pin.Origins = origins
 

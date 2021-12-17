@@ -25,7 +25,7 @@ import (
 	peerstore "github.com/libp2p/go-libp2p-core/peerstore"
 	rpc "github.com/libp2p/go-libp2p-gorpc"
 	dual "github.com/libp2p/go-libp2p-kad-dht/dual"
-	"github.com/libp2p/go-libp2p/p2p/discovery"
+	mdns "github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	ma "github.com/multiformats/go-multiaddr"
 
 	ocgorpc "github.com/lanzafame/go-libp2p-ocgorpc"
@@ -58,7 +58,7 @@ type Cluster struct {
 	config    *Config
 	host      host.Host
 	dht       *dual.DHT
-	discovery discovery.Service
+	discovery mdns.Service
 	datastore ds.Datastore
 
 	rpcServer   *rpc.Server
@@ -136,13 +136,12 @@ func NewCluster(
 
 	peerManager := pstoremgr.New(ctx, host, cfg.GetPeerstorePath())
 
-	var mdns discovery.Service
+	var mdnsSvc mdns.Service
 	if cfg.MDNSInterval > 0 {
-		mdns, err := discovery.NewMdnsService(ctx, host, cfg.MDNSInterval, mdnsServiceTag)
+		mdnsSvc = mdns.NewMdnsService(host, mdnsServiceTag, peerManager)
+		err = mdnsSvc.Start()
 		if err != nil {
 			logger.Warnf("mDNS could not be started: %s", err)
-		} else {
-			mdns.RegisterNotifee(peerManager)
 		}
 	}
 
@@ -153,7 +152,7 @@ func NewCluster(
 		config:      cfg,
 		host:        host,
 		dht:         dht,
-		discovery:   mdns,
+		discovery:   mdnsSvc,
 		datastore:   datastore,
 		consensus:   consensus,
 		apis:        apis,
@@ -297,6 +296,11 @@ func (c *Cluster) sendInformerMetrics(ctx context.Context, informer Informer) (t
 	}
 
 	for _, metric := range metrics {
+		if metric.Discard() { // do not publish invalid metrics
+			// the tags informer creates an invalid metric
+			// when no tags are defined.
+			continue
+		}
 		metric.Peer = c.id
 		ttl := metric.GetTTL()
 		if ttl > 0 && (ttl < minTTL || minTTL == 0) {
@@ -1373,6 +1377,10 @@ func (c *Cluster) setupPin(ctx context.Context, pin, existing *api.Pin) error {
 	_, span := trace.StartSpan(ctx, "cluster/setupPin")
 	defer span.End()
 
+	// Set the Pin timestamp to now(). This is not an user-controllable
+	// "option".
+	pin.Timestamp = time.Now()
+
 	err := c.setupReplicationFactor(pin)
 	if err != nil {
 		return err
@@ -1580,6 +1588,7 @@ func (c *Cluster) PinUpdate(ctx context.Context, from cid.Cid, to cid.Cid, opts 
 
 	existing.Cid = to
 	existing.PinUpdate = from
+	existing.Timestamp = time.Now()
 	if opts.Name != "" {
 		existing.Name = opts.Name
 	}

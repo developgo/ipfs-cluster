@@ -27,12 +27,11 @@ import (
 	"sync"
 	"time"
 
-	types "github.com/ipfs/ipfs-cluster/api"
-	"github.com/ipfs/ipfs-cluster/state"
-
 	cid "github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log/v2"
 	gopath "github.com/ipfs/go-path"
+	types "github.com/ipfs/ipfs-cluster/api"
+	state "github.com/ipfs/ipfs-cluster/state"
 	libp2p "github.com/libp2p/go-libp2p"
 	host "github.com/libp2p/go-libp2p-core/host"
 	peer "github.com/libp2p/go-libp2p-core/peer"
@@ -40,7 +39,6 @@ import (
 	gostream "github.com/libp2p/go-libp2p-gostream"
 	p2phttp "github.com/libp2p/go-libp2p-http"
 	noise "github.com/libp2p/go-libp2p-noise"
-	libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 	manet "github.com/multiformats/go-multiaddr/net"
 
@@ -239,13 +237,10 @@ func (api *API) setupLibp2p() error {
 		// Close() on shutdown(). Avoids things like:
 		// https://github.com/ipfs/ipfs-cluster/issues/853
 		h, err := libp2p.New(
-			context.Background(),
 			libp2p.Identity(api.config.PrivateKey),
 			libp2p.ListenAddrs(api.config.Libp2pListenAddr...),
 			libp2p.Security(noise.ID, noise.New),
 			libp2p.Security(libp2ptls.ID, libp2ptls.New),
-			libp2p.Transport(libp2pquic.NewTransport),
-			libp2p.DefaultTransports,
 		)
 		if err != nil {
 			return err

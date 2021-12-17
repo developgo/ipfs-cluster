@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -172,7 +171,10 @@ func textFormatPrintGPInfo(obj *api.GlobalPinInfo) {
 			fmt.Fprintf(&b, ": %s", v.Error)
 		}
 		txt, _ := v.TS.MarshalText()
-		fmt.Fprintf(&b, " | %s\n", txt)
+		fmt.Fprintf(&b, " | %s", txt)
+		fmt.Fprintf(&b, " | Attempts: %d", v.AttemptCount)
+		fmt.Fprintf(&b, " | Priority: %t", v.PriorityPin)
+		fmt.Fprintf(&b, "\n")
 	}
 	fmt.Print(b.String())
 }
@@ -216,11 +218,17 @@ func textFormatPrintPin(obj *api.Pin) {
 	} else {
 		fmt.Printf(" yes")
 	}
-	expireAt := "Exp: ∞"
+	expireAt := "∞"
 	if !obj.ExpireAt.IsZero() {
-		expireAt = humanize.Time(obj.ExpireAt)
+		expireAt = obj.Timestamp.Format("2006-01-02 15:04:05")
 	}
-	fmt.Printf(" | %s\n", expireAt)
+	fmt.Printf(" | Exp: %s", expireAt)
+
+	added := "unknown"
+	if !obj.Timestamp.IsZero() {
+		added = obj.Timestamp.Format("2006-01-02 15:04:05")
+	}
+	fmt.Printf(" | Added: %s\n", added)
 }
 
 func textFormatPrintAddedOutput(obj *api.AddedOutput) {
@@ -236,14 +244,12 @@ func textFormatPrintAddedOutputQuiet(obj *addedOutputQuiet) {
 }
 
 func textFormatPrintMetric(obj *api.Metric) {
-	if obj.Name == "freespace" {
-		u, err := strconv.ParseUint(obj.Value, 10, 64)
-		checkErr("parsing to uint64", err)
-		fmt.Printf("%s | freespace: %s | Expires in: %s\n", peer.Encode(obj.Peer), humanize.Bytes(u), humanize.Time(time.Unix(0, obj.Expire)))
-		return
+	v := obj.Value
+	if obj.Name == "freespace" && obj.Weight > 0 {
+		v = humanize.Bytes(uint64(obj.Weight))
 	}
 
-	fmt.Printf("%s | %s | Expires in: %s\n", peer.Encode(obj.Peer), obj.Name, humanize.Time(time.Unix(0, obj.Expire)))
+	fmt.Printf("%s | %s: %s | Expires in: %s\n", peer.Encode(obj.Peer), obj.Name, v, humanize.Time(time.Unix(0, obj.Expire)))
 }
 
 func textFormatPrintAlert(obj *api.Alert) {

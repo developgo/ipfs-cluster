@@ -49,8 +49,9 @@ type Tracker struct {
 	rpcClient *rpc.Client
 	rpcReady  chan struct{}
 
-	pinCh   chan *optracker.Operation
-	unpinCh chan *optracker.Operation
+	priorityPinCh chan *optracker.Operation
+	pinCh         chan *optracker.Operation
+	unpinCh       chan *optracker.Operation
 
 	shutdownMu sync.Mutex
 	shutdown   bool
@@ -62,64 +63,84 @@ func New(cfg *Config, pid peer.ID, peerName string, getState func(ctx context.Co
 	ctx, cancel := context.WithCancel(context.Background())
 
 	spt := &Tracker{
-		config:    cfg,
-		peerID:    pid,
-		peerName:  peerName,
-		ctx:       ctx,
-		cancel:    cancel,
-		getState:  getState,
-		optracker: optracker.NewOperationTracker(ctx, pid, peerName),
-		rpcReady:  make(chan struct{}, 1),
-		pinCh:     make(chan *optracker.Operation, cfg.MaxPinQueueSize),
-		unpinCh:   make(chan *optracker.Operation, cfg.MaxPinQueueSize),
+		config:        cfg,
+		peerID:        pid,
+		peerName:      peerName,
+		ctx:           ctx,
+		cancel:        cancel,
+		getState:      getState,
+		optracker:     optracker.NewOperationTracker(ctx, pid, peerName),
+		rpcReady:      make(chan struct{}, 1),
+		priorityPinCh: make(chan *optracker.Operation, cfg.MaxPinQueueSize),
+		pinCh:         make(chan *optracker.Operation, cfg.MaxPinQueueSize),
+		unpinCh:       make(chan *optracker.Operation, cfg.MaxPinQueueSize),
 	}
 
 	for i := 0; i < spt.config.ConcurrentPins; i++ {
-		go spt.opWorker(spt.pin, spt.pinCh)
+		go spt.opWorker(spt.pin, spt.priorityPinCh, spt.pinCh)
 	}
-	go spt.opWorker(spt.unpin, spt.unpinCh)
+	go spt.opWorker(spt.unpin, spt.unpinCh, nil)
 	return spt
 }
 
-// receives a pin Function (pin or unpin) and a channel.
-// Used for both pinning and unpinning
-func (spt *Tracker) opWorker(pinF func(*optracker.Operation) error, opChan chan *optracker.Operation) {
-	for {
-		select {
-		case op := <-opChan:
-			if cont := applyPinF(pinF, op); cont {
-				continue
-			}
+// receives a pin Function (pin or unpin) and channels.  Used for both pinning
+// and unpinning.
+func (spt *Tracker) opWorker(pinF func(*optracker.Operation) error, prioCh, normalCh chan *optracker.Operation) {
 
-			spt.optracker.Clean(op.Context(), op)
+	var op *optracker.Operation
+
+	for {
+		// Process the priority channel first.
+		select {
+		case op = <-prioCh:
+			goto APPLY_OP
 		case <-spt.ctx.Done():
 			return
+		default:
+		}
+
+		// Then process things on the other channels.
+		// Block if there are no things to process.
+		select {
+		case op = <-prioCh:
+			goto APPLY_OP
+		case op = <-normalCh:
+			goto APPLY_OP
+		case <-spt.ctx.Done():
+			return
+		}
+
+		// apply operations that came from some channel
+	APPLY_OP:
+		if clean := applyPinF(pinF, op); clean {
+			spt.optracker.Clean(op.Context(), op)
 		}
 	}
 }
 
-// applyPinF returns true if caller should call `continue` inside calling loop.
+// applyPinF returns true if the operation can be considered "DONE".
 func applyPinF(pinF func(*optracker.Operation) error, op *optracker.Operation) bool {
 	if op.Cancelled() {
 		// operation was cancelled. Move on.
 		// This saves some time, but not 100% needed.
-		return true
+		return false
 	}
 	op.SetPhase(optracker.PhaseInProgress)
+	op.IncAttempt()
 	err := pinF(op) // call pin/unpin
 	if err != nil {
 		if op.Cancelled() {
 			// there was an error because
 			// we were cancelled. Move on.
-			return true
+			return false
 		}
 		op.SetError(err)
 		op.Cancel()
-		return true
+		return false
 	}
 	op.SetPhase(optracker.PhaseDone)
 	op.Cancel()
-	return false
+	return true // this tells the opWorker to clean the operation from the tracker.
 }
 
 func (spt *Tracker) pin(op *optracker.Operation) error {
@@ -168,14 +189,22 @@ func (spt *Tracker) enqueue(ctx context.Context, c *api.Pin, typ optracker.Opera
 	logger.Debugf("entering enqueue: pin: %+v", c)
 	op := spt.optracker.TrackNewOperation(ctx, c, typ, optracker.PhaseQueued)
 	if op == nil {
-		return nil // ongoing operation.
+		return nil // the operation exists and must be queued already.
 	}
 
 	var ch chan *optracker.Operation
 
 	switch typ {
 	case optracker.OperationPin:
-		ch = spt.pinCh
+		isPriorityPin := time.Now().Before(c.Timestamp.Add(spt.config.PriorityPinMaxAge)) &&
+			op.AttemptCount() <= spt.config.PriorityPinMaxRetries
+		op.SetPriorityPin(isPriorityPin)
+
+		if isPriorityPin {
+			ch = spt.priorityPinCh
+		} else {
+			ch = spt.pinCh
+		}
 	case optracker.OperationUnpin:
 		ch = spt.unpinCh
 	}
@@ -316,8 +345,10 @@ func (spt *Tracker) Status(ctx context.Context, c cid.Cid) *api.PinInfo {
 		Peer: spt.peerID,
 		Name: "", // etc to be filled later
 		PinInfoShort: api.PinInfoShort{
-			PeerName: spt.peerName,
-			TS:       time.Now(),
+			PeerName:     spt.peerName,
+			TS:           time.Now(),
+			AttemptCount: 0,
+			PriorityPin:  false,
 		},
 	}
 
@@ -346,6 +377,7 @@ func (spt *Tracker) Status(ctx context.Context, c cid.Cid) *api.PinInfo {
 	pinInfo.Allocations = gpin.Allocations
 	pinInfo.Origins = gpin.Origins
 	pinInfo.Metadata = gpin.Metadata
+	pinInfo.TS = gpin.Timestamp
 
 	// check if pin is a meta pin
 	if gpin.Type == api.MetaType {
@@ -396,11 +428,19 @@ func (spt *Tracker) RecoverAll(ctx context.Context) ([]*api.PinInfo, error) {
 	statuses := spt.StatusAll(ctx, api.TrackerStatusUndefined)
 	resp := make([]*api.PinInfo, 0)
 	for _, st := range statuses {
-		r, err := spt.recoverWithPinInfo(ctx, st)
-		if err != nil {
-			return resp, err
+		// Break out if we shutdown. We might be going through
+		// a very long list of statuses.
+		select {
+		case <-spt.ctx.Done():
+			return nil, spt.ctx.Err()
+		default:
+			r, err := spt.recoverWithPinInfo(ctx, st)
+			if err != nil {
+				return resp, err
+			}
+			resp = append(resp, r)
 		}
-		resp = append(resp, r)
+
 	}
 	return resp, nil
 }
@@ -469,9 +509,11 @@ func (spt *Tracker) ipfsStatusAll(ctx context.Context) (map[cid.Cid]*api.PinInfo
 			Metadata:    nil, // to be filled later
 			Peer:        spt.peerID,
 			PinInfoShort: api.PinInfoShort{
-				PeerName: spt.peerName,
-				Status:   ips.ToTrackerStatus(),
-				TS:       time.Now(),
+				PeerName:     spt.peerName,
+				Status:       ips.ToTrackerStatus(),
+				TS:           time.Now(), // to be set later
+				AttemptCount: 0,
+				PriorityPin:  false,
 			},
 		}
 		pins[c] = p
@@ -533,8 +575,10 @@ func (spt *Tracker) localStatus(ctx context.Context, incExtra bool, filter api.T
 			Origins:     p.Origins,
 			Metadata:    p.Metadata,
 			PinInfoShort: api.PinInfoShort{
-				PeerName: spt.peerName,
-				TS:       time.Now(),
+				PeerName:     spt.peerName,
+				TS:           p.Timestamp,
+				AttemptCount: 0,
+				PriorityPin:  false,
 			},
 		}
 
@@ -556,6 +600,7 @@ func (spt *Tracker) localStatus(ctx context.Context, incExtra bool, filter api.T
 			ipfsInfo.Allocations = p.Allocations
 			ipfsInfo.Origins = p.Origins
 			ipfsInfo.Metadata = p.Metadata
+			ipfsInfo.TS = p.Timestamp
 			pininfos[p.Cid] = ipfsInfo
 		default:
 			// report as UNEXPECTEDLY_UNPINNED for this peer.
